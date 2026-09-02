@@ -1,0 +1,20 @@
+[package]
+name = "hfmcbot"
+version = "0.1.0"
+edition = "2021"
+description = "SOL meme new-launch spray + let-winners-run bot (paper mode first)"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rust_decimal = { version = "1", features = ["maths"] }
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
