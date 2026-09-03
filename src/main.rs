@@ -3,17 +3,23 @@
 //! Usage:
 //!   hfmcbot                       # paper mode with no feed attached (idle)
 //!   hfmcbot data/events.jsonl     # replay a recorded launch feed (backtest)
+//!
+//! Observability (M0): `/metrics` (Prometheus text) + `/healthz` on
+//! `HFM_METRICS_ADDR`, periodic heartbeat logs, panic hook → tracing.
 
 use hfmcbot::config::Config;
 use hfmcbot::engine::Engine;
 use hfmcbot::exec::PaperExecutor;
 use hfmcbot::ingest::{LaunchFeed, ReplayFeed};
+use hfmcbot::metrics;
 use hfmcbot::persist::AuditLog;
 use hfmcbot::types::HoldMode;
 use rust_decimal::Decimal;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // .env first so tracing/config pick up local overrides.
     match dotenvy::dotenv() {
         Ok(path) => eprintln!("loaded env from {}", path.display()),
@@ -24,8 +30,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+    metrics::install_panic_hook();
 
     let cfg = Config::from_env().map_err(|e| format!("config error: {e}"))?;
+
+    // Operator keypair (M0): optional in paper, required for live (M4+).
+    // Only the pubkey + source var are ever logged — never the secret.
+    match hfmcbot::keys::load_keypair_opt() {
+        Ok(Some(k)) => tracing::info!(
+            pubkey = %k.pubkey_base58,
+            source = k.source.var_name(),
+            mode = %cfg.mode,
+            "operator key ready"
+        ),
+        Ok(None) => tracing::warn!(
+            mode = %cfg.mode,
+            "no operator key set (HFM_SECRET_KEY/SECRET_KEY) — paper mode only"
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "operator key invalid");
+            return Err(format!("operator key error: {e}").into());
+        }
+    }
+
+    // Observability: snapshot shared with the /metrics server.
+    let snapshot = Arc::new(Mutex::new(metrics::EngineSnapshot::default()));
+    let metrics_addr = cfg.metrics_addr.clone();
+    let heartbeat_secs = cfg.heartbeat_secs;
+    {
+        let snap = snapshot.clone();
+        tokio::spawn(async move {
+            if let Err(e) = metrics::serve_metrics(metrics_addr, snap).await {
+                tracing::error!(error = %e, "metrics server exited");
+            }
+        });
+    }
+    metrics::spawn_heartbeat(heartbeat_secs);
 
     // Replay path: CLI arg wins over HFM_REPLAY_EVENTS_PATH.
     let replay_path = std::env::args()
@@ -45,6 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("{}", engine.summary());
         println!("audit log: {}", audit_path.display());
+        if let Ok(mut s) = snapshot.lock() {
+            *s = engine.snapshot();
+        }
         return Ok(());
     };
 
@@ -56,6 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(ev) = feed.next_event() {
         engine.on_event(&ev);
         seen += 1;
+    }
+    if let Ok(mut s) = snapshot.lock() {
+        *s = engine.snapshot();
     }
 
     println!("processed {seen} events");

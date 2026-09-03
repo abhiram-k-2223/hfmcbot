@@ -59,9 +59,15 @@ pub struct Config {
     pub max_trades_per_min: u32,
     pub kill_switch: bool,
 
-    // paper execution
+    // paper execution (depth-aware slippage: base + coeff * notional/liq, capped)
     pub paper_slippage_pct: Decimal,
+    pub paper_impact_coeff: Decimal,
+    pub paper_max_slippage_pct: Decimal,
     pub fee_bps: u64,
+
+    // observability (M0)
+    pub metrics_addr: String,
+    pub heartbeat_secs: u64,
 
     // persistence
     pub audit_log_path: String,
@@ -105,7 +111,11 @@ impl Config {
             max_trades_per_min: env_u64("HFM_MAX_TRADES_PER_MIN", 6)? as u32,
             kill_switch: env_bool("HFM_KILL_SWITCH", false)?,
             paper_slippage_pct: env_dec("HFM_PAPER_SLIPPAGE_PCT", dec!(2))?,
+            paper_impact_coeff: env_dec("HFM_PAPER_IMPACT_COEFF", dec!(1))?,
+            paper_max_slippage_pct: env_dec("HFM_PAPER_MAX_SLIPPAGE_PCT", dec!(50))?,
             fee_bps: env_u64("HFM_FEE_BPS", 100)?,
+            metrics_addr: env_str("HFM_METRICS_ADDR", "127.0.0.1:9898"),
+            heartbeat_secs: env_u64("HFM_HEARTBEAT_SECS", 60)?,
             audit_log_path: env_str("HFM_AUDIT_LOG_PATH", "data/audit.jsonl"),
             replay_events_path: env_non_empty("HFM_REPLAY_EVENTS_PATH"),
             rpc_url: env_str("HFM_RPC_URL", "https://api.mainnet-beta.solana.com"),
@@ -132,6 +142,31 @@ impl Config {
         pos(self.stop_loss_pct, "HFM_STOP_LOSS_PCT")?;
         pos(self.trail_pct, "HFM_TRAIL_PCT")?;
         pos(self.risk_per_trade_pct, "HFM_RISK_PER_TRADE_PCT")?;
+        if self.paper_slippage_pct < Decimal::ZERO {
+            return Err(format!(
+                "HFM_PAPER_SLIPPAGE_PCT must be >= 0, got {}",
+                self.paper_slippage_pct
+            ));
+        }
+        if self.paper_impact_coeff < Decimal::ZERO {
+            return Err(format!(
+                "HFM_PAPER_IMPACT_COEFF must be >= 0, got {}",
+                self.paper_impact_coeff
+            ));
+        }
+        pos(self.paper_max_slippage_pct, "HFM_PAPER_MAX_SLIPPAGE_PCT")?;
+        if self.paper_max_slippage_pct > dec!(100) {
+            return Err(format!(
+                "HFM_PAPER_MAX_SLIPPAGE_PCT must be <= 100, got {}",
+                self.paper_max_slippage_pct
+            ));
+        }
+        if self.heartbeat_secs == 0 {
+            return Err("HFM_HEARTBEAT_SECS must be >= 1".into());
+        }
+        if self.metrics_addr.trim().is_empty() {
+            return Err("HFM_METRICS_ADDR must not be empty".into());
+        }
         if self.funnel_slices == 0 {
             return Err("HFM_FUNNEL_SLICES must be >= 1".into());
         }
@@ -219,7 +254,11 @@ impl Config {
             max_trades_per_min: 6,
             kill_switch: false,
             paper_slippage_pct: dec!(2),
+            paper_impact_coeff: dec!(1),
+            paper_max_slippage_pct: dec!(50),
             fee_bps: 100,
+            metrics_addr: "127.0.0.1:9898".into(),
+            heartbeat_secs: 60,
             audit_log_path: "/tmp/hfmcbot-test-audit.jsonl".into(),
             replay_events_path: None,
             rpc_url: "https://example.invalid".into(),

@@ -154,12 +154,13 @@ impl Executor for FailFirstSell {
         mint: &str,
         budget_usd: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         deadline: DateTime<Utc>,
         order_id: &str,
     ) -> Result<Fill, ExecError> {
         self.inner
-            .buy(mint, budget_usd, price_usd, now, deadline, order_id)
+            .buy(mint, budget_usd, price_usd, liquidity_usd, now, deadline, order_id)
     }
 
     fn sell(
@@ -167,6 +168,7 @@ impl Executor for FailFirstSell {
         mint: &str,
         qty: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         order_id: &str,
     ) -> Result<Fill, ExecError> {
@@ -175,7 +177,7 @@ impl Executor for FailFirstSell {
         if *n == 1 {
             return Err(ExecError::Rejected("chaos: first sell fails".into()));
         }
-        self.inner.sell(mint, qty, price_usd, now, order_id)
+        self.inner.sell(mint, qty, price_usd, liquidity_usd, now, order_id)
     }
 }
 

@@ -13,11 +13,11 @@ wallet `CLM6E4…Kg1Q` (see `REPORT.md`), built to the spec in `BUILD_PROMPT.md`
 
 | Milestone | State | Notes |
 |---|---|---|
-| M0 Skeleton (config, logging, audit, validation) | ✅ | `config.rs`, `persist.rs` |
+| M0 Skeleton (config, logging, audit, validation) | ✅ | `config.rs`, `persist.rs`, `keys.rs` (operator keypair, secret never logged), `metrics.rs` (`/metrics` + `/healthz`, heartbeat, panic hook) |
 | M1 Ingest (Geyser/WS launch + price feed) | ⬜ stub | `ingest.rs` has the `LaunchFeed` trait + deterministic `ReplayFeed`; live WS feed plugs into the same trait |
 | M2 Decision (entry gate, funnel sizing, stop/trail) + backtest harness | ✅ | `strategy.rs`, `engine.rs`, `ReplayFeed` |
 | M2 Risk/circuit breakers (**in M2, not deferred**) | ✅ | `risk.rs` — kill switch, daily-loss breaker, throttle, position cap |
-| M3 Execution (paper) | ✅ | `exec.rs` — `Executor` trait + slippage/fee-simulating `PaperExecutor`; Jupiter/Jito live impl lands in M3.5/M4 |
+| M3 Execution (paper) | ✅ | `exec.rs` — `Executor` trait + depth-aware `PaperExecutor`: fill slippage = base + impact coeff × (notional/liquidity), capped; Jupiter/Jito live impl lands in M3.5/M4 |
 | M4 devnet / M5 mainnet-beta / M6 harden | ⬜ | config refuses `HFM_MODE=live` until then |
 
 ## Quick start
@@ -25,7 +25,7 @@ wallet `CLM6E4…Kg1Q` (see `REPORT.md`), built to the spec in `BUILD_PROMPT.md`
 ```bash
 cp .env.example .env          # tune thresholds; every threshold is env-driven
 cargo run -- data/example_events.jsonl   # replay the bundled demo feed
-cargo test                    # 27 unit + integration tests
+cargo test                    # 46 unit + integration tests
 ```
 
 Replay a feed of your own: JSONL, one event per line (`{"type":"launch",...}`
@@ -88,5 +88,6 @@ fail fast at boot (validation in `config.rs`).
 1. Live Geyser/WS `LaunchFeed` (pump.fun/stonkfun `create`/`trade`).
 2. Jupiter quote → swap tx builder; Jito bundle with configurable tip tier.
 3. Postgres audit tables (replacing JSONL via the same `AuditRecord` schema).
-4. Prometheus `/metrics` + alerting webhook; multi-RPC failover; blockhash
+4. Alerting webhook; multi-RPC failover; blockhash
    manager; devnet e2e; replay sign-off gate before mainnet-beta.
+   (Prometheus `/metrics` + `/healthz` already serve on `HFM_METRICS_ADDR`.)

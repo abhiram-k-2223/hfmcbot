@@ -210,6 +210,7 @@ mod tests {
             cost_usd: dec!(1000),
             high_water: high,
             last_price: high,
+            last_liquidity_usd: dec!(1_000_000),
             mode,
         }
     }
@@ -326,12 +327,12 @@ mod tests {
     fn time_stop_fires_without_price_ticks() {
         let cfg = Config::paper_defaults();
         // No price input at all — pure clock-based exit.
-        let mut p = pos(dec!(1), dec!(1), HoldMode::Flip, 0);
+        let p = pos(dec!(1), dec!(1), HoldMode::Flip, 0);
         assert!(on_time(&p, ts(21_599), &cfg).is_none());
         let d = on_time(&p, ts(21_600), &cfg).unwrap();
         assert_eq!(d.reason, "max_hold");
 
-        let mut p = pos(dec!(1), dec!(4), HoldMode::Conviction, 0);
+        let p = pos(dec!(1), dec!(4), HoldMode::Conviction, 0);
         assert!(on_time(&p, ts(15 * 86_400 - 1), &cfg).is_none());
         let d = on_time(&p, ts(15 * 86_400), &cfg).unwrap();
         assert_eq!(d.reason, "conviction_max_hold");

@@ -136,17 +136,22 @@ impl Engine {
                 break;
             }
             let order_id = self.next_order_id(&mint);
-            let audit_fill = match self
-                .exec
-                .buy(&mint, *slice, launch.price_usd, now, deadline, &order_id)
-            {
+            let audit_fill = match self.exec.buy(
+                &mint,
+                *slice,
+                launch.price_usd,
+                launch.liquidity_usd,
+                now,
+                deadline,
+                &order_id,
+            ) {
                 Ok(f) => f,
                 Err(e) => {
                     self.audit_decision(now, &mint, "order_failed", &e.to_string());
                     break;
                 }
             };
-            self.apply_buy_fill(&audit_fill, launch.launchpad, now);
+            self.apply_buy_fill(&audit_fill, launch.launchpad, launch.liquidity_usd, now);
             self.log_order_and_fill(now, &order_id, &mint, Side::Buy, *slice, launch.price_usd, &audit_fill);
         }
     }
@@ -157,7 +162,13 @@ impl Engine {
     }
 
     /// Accumulate a funnel-slice fill into the per-token position (VWAP entry).
-    fn apply_buy_fill(&mut self, fill: &Fill, launchpad: Launchpad, _now: DateTime<Utc>) {
+    fn apply_buy_fill(
+        &mut self,
+        fill: &Fill,
+        launchpad: Launchpad,
+        liquidity_usd: Decimal,
+        _now: DateTime<Utc>,
+    ) {
         let cost = fill.notional_usd + fill.fee_usd;
         let pos = self.positions.entry(fill.mint.clone()).or_insert(Position {
             mint: fill.mint.clone(),
@@ -168,6 +179,7 @@ impl Engine {
             cost_usd: Decimal::ZERO,
             high_water: fill.price_usd,
             last_price: fill.price_usd,
+            last_liquidity_usd: liquidity_usd,
             mode: HoldMode::Flip,
         });
         let new_qty = pos.qty + fill.qty;
@@ -179,6 +191,7 @@ impl Engine {
         pos.qty = new_qty;
         pos.cost_usd += cost;
         pos.last_price = fill.price_usd;
+        pos.last_liquidity_usd = liquidity_usd;
         if fill.price_usd > pos.high_water {
             pos.high_water = fill.price_usd;
         }
@@ -187,11 +200,21 @@ impl Engine {
     }
 
     /// Flatten positions whose time stop elapsed while their feed went quiet.
-    /// Uses `last_price` as the sell reference — the best information we have
-    /// without a fresh tick.
+    /// Uses `last_price` / `last_liquidity_usd` as the sell reference — the
+    /// best information we have without a fresh tick.
     fn sweep_time_stops(&mut self, now: DateTime<Utc>) {
-        let mut exits: Vec<(String, Decimal, Decimal, HoldMode, Decimal, Decimal, &'static str)> =
-            Vec::new();
+        /// (mint, qty, cost, mode, entry, ref_price, liquidity, reason).
+        type TimeStopExit = (
+            String,
+            Decimal,
+            Decimal,
+            HoldMode,
+            Decimal,
+            Decimal,
+            Decimal,
+            &'static str,
+        );
+        let mut exits: Vec<TimeStopExit> = Vec::new();
         for pos in self.positions.values_mut() {
             if let Some(d) = strategy::on_time(pos, now, &self.cfg) {
                 exits.push((
@@ -201,12 +224,13 @@ impl Engine {
                     pos.mode,
                     pos.entry_price,
                     pos.last_price,
+                    pos.last_liquidity_usd,
                     d.reason,
                 ));
             }
         }
-        for (mint, qty, cost, mode, entry, ref_price, reason) in exits {
-            self.close_position(&mint, qty, cost, mode, entry, ref_price, now, reason);
+        for (mint, qty, cost, mode, entry, ref_price, liq, reason) in exits {
+            self.close_position(&mint, qty, cost, mode, entry, ref_price, liq, now, reason);
         }
     }
 
@@ -217,18 +241,28 @@ impl Engine {
             return;
         };
         pos.last_price = pu.price_usd;
+        pos.last_liquidity_usd = pu.liquidity_usd;
         let Some(exit) = strategy::on_price(pos, pu.price_usd, pu.ts, &self.cfg) else {
             return;
         };
         let (mint, qty, cost, mode, entry_price) =
             (pos.mint.clone(), pos.qty, pos.cost_usd, pos.mode, pos.entry_price);
         self.close_position(
-            &mint, qty, cost, mode, entry_price, pu.price_usd, pu.ts, exit.reason,
+            &mint,
+            qty,
+            cost,
+            mode,
+            entry_price,
+            pu.price_usd,
+            pu.liquidity_usd,
+            pu.ts,
+            exit.reason,
         );
     }
 
     /// Flatten a position. Sells are NEVER blocked by risk checks (cutting
     /// losers must always be possible) — they only count toward the throttle.
+    #[allow(clippy::too_many_arguments)]
     fn close_position(
         &mut self,
         mint: &str,
@@ -237,12 +271,13 @@ impl Engine {
         mode: HoldMode,
         entry_price: Decimal,
         ref_price: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         reason: &str,
     ) {
         self.risk.note_side(Side::Sell, now);
         let order_id = self.next_order_id(mint);
-        let fill = match self.exec.sell(mint, qty, ref_price, now, &order_id) {
+        let fill = match self.exec.sell(mint, qty, ref_price, liquidity_usd, now, &order_id) {
             Ok(f) => f,
             Err(e) => {
                 self.audit_decision(now, mint, "exit_failed", &e.to_string());
@@ -412,6 +447,24 @@ impl Engine {
             total_pnl,
         )
     }
+
+    /// Point-in-time numbers for the `/metrics` endpoint. Strings (not floats)
+    /// so Prometheus sees exact Decimal values.
+    pub fn snapshot(&self) -> crate::metrics::EngineSnapshot {
+        let wins = self.closed.iter().filter(|t| t.pnl_usd > Decimal::ZERO).count();
+        let total_pnl: Decimal = self.closed.iter().map(|t| t.pnl_usd).sum();
+        crate::metrics::EngineSnapshot {
+            equity_usd: self.equity.to_string(),
+            deployed_usd: self.deployed_usd.to_string(),
+            open_positions: self.open_positions(),
+            closed_trades: self.closed.len(),
+            wins,
+            losses: self.closed.len() - wins,
+            realized_pnl_usd: total_pnl.to_string(),
+            day_realized_pnl_usd: self.day_realized_pnl().to_string(),
+            kill_switch: self.kill_switch(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +607,20 @@ mod tests {
         eng.on_event(&price("STALE", 21_700, dec!(1.01)));
         assert_eq!(eng.open_positions(), 0);
         assert_eq!(eng.closed_trades()[0].exit_reason, "max_hold");
+    }
+
+    #[test]
+    fn snapshot_feeds_metrics_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut eng = engine(&dir, &Config::paper_defaults());
+        eng.on_launch(launch("AAA", dec!(0.001)));
+        let s = eng.snapshot();
+        assert_eq!(s.open_positions, 1);
+        assert_eq!(s.closed_trades, 0);
+        assert_eq!(s.wins, 0);
+        assert!(!s.kill_switch);
+        let text = crate::metrics::render_prometheus_text(&s);
+        assert!(text.contains("hfmcbot_open_positions 1"));
     }
 }
 

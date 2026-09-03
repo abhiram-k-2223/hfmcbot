@@ -29,14 +29,20 @@ pub enum ExecError {
 pub trait Executor {
     /// Buy `budget_usd` worth of `mint` at reference `price_usd`.
     ///
+    /// `liquidity_usd` is the pool liquidity at decision time — the paper
+    /// executor turns it into depth-aware slippage; live executors use it
+    /// for preflight slippage-budget checks.
+    ///
     /// `deadline` bounds the funnel window (spec §4: all slices land within
     /// `funnel_window_secs`). Live executors must refuse slices sent past it;
     /// the paper executor is instantaneous so the deadline is trivially met.
+    #[allow(clippy::too_many_arguments)]
     fn buy(
         &mut self,
         mint: &str,
         budget_usd: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         deadline: DateTime<Utc>,
         order_id: &str,
@@ -48,19 +54,44 @@ pub trait Executor {
         mint: &str,
         qty: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         order_id: &str,
     ) -> Result<Fill, ExecError>;
 }
 
+/// Depth-aware slippage: `base + coeff * (notional / liquidity * 100)`,
+/// capped at `max`. Pure function of Decimals — no floats, deterministic.
+///
+/// Intuition is constant-product price impact: a $1.25K slice into an $8K
+/// bonding-curve pool moves the price ~15% before fees, while the same slice
+/// into $1M of graduated liquidity costs ~base only. `liquidity <= 0` (unknown
+/// depth) falls back to `base` rather than guessing.
+pub fn effective_slippage_pct(
+    base_pct: Decimal,
+    impact_coeff: Decimal,
+    max_pct: Decimal,
+    notional_usd: Decimal,
+    liquidity_usd: Decimal,
+) -> Decimal {
+    if liquidity_usd <= Decimal::ZERO || notional_usd <= Decimal::ZERO {
+        return base_pct.min(max_pct);
+    }
+    let depth_pct = notional_usd / liquidity_usd * Decimal::from(100);
+    (base_pct + impact_coeff * depth_pct).min(max_pct)
+}
+
 /// Paper executor: deterministic simulation, no RNG, no network.
 ///
-/// - buys fill at `price * (1 + slippage)`, sells at `price * (1 - slippage)`
-///   (we cross the spread against ourselves);
+/// - buys fill at `price * (1 + eff)`, sells at `price * (1 - eff)` where
+///   `eff = base + coeff * (notional/liquidity)` capped at `max` (we cross
+///   the spread against ourselves, and thin bonding-curve pools cost more);
 /// - a `fee_bps` fee is charged on notional (Pump.fun-style ~1%);
 /// - zero/negative budget or qty and non-positive prices are rejected.
 pub struct PaperExecutor {
     slippage_pct: Decimal,
+    impact_coeff: Decimal,
+    max_slippage_pct: Decimal,
     fee_bps: Decimal,
     /// Basis points (0..=10_000) chance any given order fails, decided as a
     /// pure function of the order id (FNV-1a) — no RNG state, so replays stay
@@ -72,6 +103,8 @@ impl PaperExecutor {
     pub fn new(cfg: &Config) -> PaperExecutor {
         PaperExecutor {
             slippage_pct: cfg.paper_slippage_pct,
+            impact_coeff: cfg.paper_impact_coeff,
+            max_slippage_pct: cfg.paper_max_slippage_pct,
             fee_bps: Decimal::from(cfg.fee_bps),
             failure_bps: 0,
         }
@@ -83,6 +116,8 @@ impl PaperExecutor {
     pub fn with_failure_bps(cfg: &Config, failure_bps: u64) -> PaperExecutor {
         PaperExecutor {
             slippage_pct: cfg.paper_slippage_pct,
+            impact_coeff: cfg.paper_impact_coeff,
+            max_slippage_pct: cfg.paper_max_slippage_pct,
             fee_bps: Decimal::from(cfg.fee_bps),
             failure_bps: failure_bps.min(10_000),
         }
@@ -105,22 +140,23 @@ impl PaperExecutor {
         Self::would_fail(order_id, self.failure_bps)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill(
         &self,
         side: Side,
         mint: &str,
         qty: Decimal,
         ref_price: Decimal,
+        eff_slip_pct: Decimal,
         now: DateTime<Utc>,
         order_id: &str,
-    ) -> Result<Fill, ExecError> {
-        if ref_price <= Decimal::ZERO || qty <= Decimal::ZERO {
+    ) -> Result<Fill, ExecError> {        if ref_price <= Decimal::ZERO || qty <= Decimal::ZERO {
             return Err(ExecError::Rejected(format!(
                 "non-positive qty ({qty}) or price ({ref_price}) for {mint}"
             )));
         }
-        let slip = Decimal::ONE + self.slippage_pct / Decimal::from(100);
-        let anti = Decimal::ONE - self.slippage_pct / Decimal::from(100);
+        let slip = Decimal::ONE + eff_slip_pct / Decimal::from(100);
+        let anti = Decimal::ONE - eff_slip_pct / Decimal::from(100);
         let price = match side {
             Side::Buy => ref_price * slip,
             Side::Sell => ref_price * anti,
@@ -153,6 +189,7 @@ impl Executor for PaperExecutor {
         mint: &str,
         budget_usd: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         _deadline: DateTime<Utc>,
         order_id: &str,
@@ -167,9 +204,16 @@ impl Executor for PaperExecutor {
                 "non-positive budget ({budget_usd}) or price ({price_usd}) for {mint}"
             )));
         }
-        let fill_price = price_usd * (Decimal::ONE + self.slippage_pct / Decimal::from(100));
+        let eff = effective_slippage_pct(
+            self.slippage_pct,
+            self.impact_coeff,
+            self.max_slippage_pct,
+            budget_usd,
+            liquidity_usd,
+        );
+        let fill_price = price_usd * (Decimal::ONE + eff / Decimal::from(100));
         let qty = budget_usd / fill_price;
-        self.fill(Side::Buy, mint, qty, price_usd, now, order_id)
+        self.fill(Side::Buy, mint, qty, price_usd, eff, now, order_id)
     }
 
     fn sell(
@@ -177,6 +221,7 @@ impl Executor for PaperExecutor {
         mint: &str,
         qty: Decimal,
         price_usd: Decimal,
+        liquidity_usd: Decimal,
         now: DateTime<Utc>,
         order_id: &str,
     ) -> Result<Fill, ExecError> {
@@ -185,7 +230,15 @@ impl Executor for PaperExecutor {
                 "simulated fill failure (order {order_id})"
             )));
         }
-        self.fill(Side::Sell, mint, qty, price_usd, now, order_id)
+        let notional = qty * price_usd;
+        let eff = effective_slippage_pct(
+            self.slippage_pct,
+            self.impact_coeff,
+            self.max_slippage_pct,
+            notional,
+            liquidity_usd,
+        );
+        self.fill(Side::Sell, mint, qty, price_usd, eff, now, order_id)
     }
 }
 
@@ -201,8 +254,12 @@ mod tests {
 
     #[test]
     fn buy_applies_slippage_and_fee() {
-        let mut ex = PaperExecutor::new(&Config::paper_defaults()); // 2% slip, 100bps fee
-        let f = ex.buy("M", dec!(1000), dec!(1), ts(0), ts(5), "o1").unwrap();
+        let mut cfg = Config::paper_defaults();
+        cfg.paper_impact_coeff = Decimal::ZERO; // isolate base slippage
+        let mut ex = PaperExecutor::new(&cfg); // 2% slip, 100bps fee
+        let f = ex
+            .buy("M", dec!(1000), dec!(1), dec!(1_000_000), ts(0), ts(5), "o1")
+            .unwrap();
         assert_eq!(f.side, Side::Buy);
         assert_eq!(f.price_usd, dec!(1.02));
         // qty = budget/fill_price, settled at FILL_DP.
@@ -219,9 +276,11 @@ mod tests {
 
     #[test]
     fn sell_applies_anti_slippage() {
-        let mut ex = PaperExecutor::new(&Config::paper_defaults());
+        let mut cfg = Config::paper_defaults();
+        cfg.paper_impact_coeff = Decimal::ZERO;
+        let mut ex = PaperExecutor::new(&cfg);
         let f = ex
-            .sell("M", dec!(1000), dec!(2), ts(0), "o2")
+            .sell("M", dec!(1000), dec!(2), dec!(1_000_000), ts(0), "o2")
             .unwrap();
         assert_eq!(f.price_usd, dec!(1.96)); // 2 * 0.98
         assert_eq!(f.notional_usd, dec!(1960));
@@ -229,25 +288,67 @@ mod tests {
     }
 
     #[test]
+    fn depth_impact_scales_with_notional_over_liquidity() {
+        // base 2% + 1.0 * (1000/8000*100=12.5%) = 14.5% on thin curve pool.
+        assert_eq!(
+            effective_slippage_pct(dec!(2), dec!(1), dec!(50), dec!(1000), dec!(8000)),
+            dec!(14.5)
+        );
+        // Same slice into deep graduated liquidity costs ~base only.
+        assert_eq!(
+            effective_slippage_pct(dec!(2), dec!(1), dec!(50), dec!(1000), dec!(1_000_000)),
+            dec!(2.1)
+        );
+        // Cap binds on whale-into-puddle trades.
+        assert_eq!(
+            effective_slippage_pct(dec!(2), dec!(1), dec!(50), dec!(8000), dec!(8000)),
+            dec!(50)
+        );
+        // Unknown depth falls back to base (never guesses).
+        assert_eq!(
+            effective_slippage_pct(dec!(2), dec!(1), dec!(50), dec!(1000), Decimal::ZERO),
+            dec!(2)
+        );
+    }
+
+    #[test]
+    fn thin_pool_buy_pays_impact_and_thick_pool_does_not() {
+        let mut ex = PaperExecutor::new(&Config::paper_defaults()); // base 2, coeff 1
+        // $1000 into $8000 pool → 14.5% slippage → fill at 1.145.
+        let thin = ex
+            .buy("M", dec!(1000), dec!(1), dec!(8000), ts(0), ts(5), "thin")
+            .unwrap();
+        assert_eq!(thin.price_usd, dec!(1.145));
+        // Same $1000 into $1M pool → 2.1% → fill at 1.021.
+        let thick = ex
+            .buy("M", dec!(1000), dec!(1), dec!(1_000_000), ts(0), ts(5), "thick")
+            .unwrap();
+        assert_eq!(thick.price_usd, dec!(1.021));
+        assert!(thin.price_usd > thick.price_usd);
+    }
+
+    #[test]
     fn rejects_garbage() {
         let mut ex = PaperExecutor::new(&Config::paper_defaults());
-        assert!(ex.buy("M", Decimal::ZERO, dec!(1), ts(0), ts(5), "o").is_err());
-        assert!(ex.sell("M", dec!(0), dec!(1), ts(0), "o").is_err());
-        assert!(ex.buy("M", dec!(10), Decimal::ZERO, ts(0), ts(5), "o").is_err());
+        let liq = dec!(1_000_000);
+        assert!(ex.buy("M", Decimal::ZERO, dec!(1), liq, ts(0), ts(5), "o").is_err());
+        assert!(ex.sell("M", dec!(0), dec!(1), liq, ts(0), "o").is_err());
+        assert!(ex.buy("M", dec!(10), Decimal::ZERO, liq, ts(0), ts(5), "o").is_err());
     }
 
     #[test]
     fn deterministic_failure_injection() {
         let cfg = Config::paper_defaults();
+        let liq = dec!(1_000_000);
         // Default rate 0: never fails.
         let mut ex = PaperExecutor::new(&cfg);
-        assert!(ex.buy("M", dec!(10), dec!(1), ts(0), ts(5), "id1").is_ok());
+        assert!(ex.buy("M", dec!(10), dec!(1), liq, ts(0), ts(5), "id1").is_ok());
 
         // Rate 100%: always fails, and the same order id always fails.
         let mut ex = PaperExecutor::with_failure_bps(&cfg, 10_000);
-        assert!(ex.buy("M", dec!(10), dec!(1), ts(0), ts(5), "x").is_err());
-        assert!(ex.buy("M", dec!(10), dec!(1), ts(0), ts(5), "x").is_err());
-        assert!(ex.sell("M", dec!(10), dec!(1), ts(0), "x").is_err());
+        assert!(ex.buy("M", dec!(10), dec!(1), liq, ts(0), ts(5), "x").is_err());
+        assert!(ex.buy("M", dec!(10), dec!(1), liq, ts(0), ts(5), "x").is_err());
+        assert!(ex.sell("M", dec!(10), dec!(1), liq, ts(0), "x").is_err());
 
         // The decision is a pure function of (order_id, rate).
         assert_eq!(

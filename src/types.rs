@@ -97,6 +97,9 @@ pub struct Position {
     /// Last observed price (fill or tick) — the reference for time-stop
     /// sweeps when no fresh tick is available.
     pub last_price: Decimal,
+    /// Last observed pool liquidity — the depth reference for time-stop
+    /// sweeps (which have no fresh `PriceUpdate` to draw liquidity from).
+    pub last_liquidity_usd: Decimal,
     pub mode: HoldMode,
 }
 
