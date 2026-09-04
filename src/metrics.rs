@@ -18,6 +18,8 @@ pub struct EngineSnapshot {
     pub realized_pnl_usd: String,
     pub day_realized_pnl_usd: String,
     pub kill_switch: bool,
+    /// Positions marked unsellable after `max_exit_attempts` failed exits.
+    pub stuck_positions: usize,
 }
 
 /// Render Prometheus exposition format.
@@ -50,7 +52,10 @@ pub fn render_prometheus_text(s: &EngineSnapshot) -> String {
          hfmcbot_day_realized_pnl_usd {}\n\
          # HELP hfmcbot_kill_switch Circuit-breaker state (1 = tripped).\n\
          # TYPE hfmcbot_kill_switch gauge\n\
-         hfmcbot_kill_switch {}\n",
+         hfmcbot_kill_switch {}\n\
+         # HELP hfmcbot_stuck_positions Positions marked unsellable.\n\
+         # TYPE hfmcbot_stuck_positions gauge\n\
+         hfmcbot_stuck_positions {}\n",
         s.equity_usd,
         s.deployed_usd,
         s.open_positions,
@@ -60,6 +65,7 @@ pub fn render_prometheus_text(s: &EngineSnapshot) -> String {
         s.realized_pnl_usd,
         s.day_realized_pnl_usd,
         kill,
+        s.stuck_positions,
     )
 }
 
@@ -138,6 +144,7 @@ mod tests {
             realized_pnl_usd: "123.45".into(),
             day_realized_pnl_usd: "-10".into(),
             kill_switch: false,
+            stuck_positions: 0,
         }
     }
 

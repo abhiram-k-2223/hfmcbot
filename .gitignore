@@ -2,3 +2,8 @@
 .env
 *.log
 data/audit*.jsonl
+data/ws_*.jsonl
+data/shadow_*.jsonl
+data/live_*.jsonl
+data/*_state.json
+progress.md

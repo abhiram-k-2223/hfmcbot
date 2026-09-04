@@ -101,6 +101,16 @@ pub struct Position {
     /// sweeps (which have no fresh `PriceUpdate` to draw liquidity from).
     pub last_liquidity_usd: Decimal,
     pub mode: HoldMode,
+    /// Consecutive failed exit attempts (M3.5 reconciliation, spec §5.5).
+    #[serde(default)]
+    pub exit_attempts: u32,
+    /// True once `exit_attempts` reaches `max_exit_attempts`: the token is
+    /// treated as unsellable (dead pool / no route). The position stays fully
+    /// accounted in `deployed_usd` — the funds really are stuck — but it is
+    /// surfaced in metrics/summary and skipped by the time-stop sweep (never
+    /// blind-resubmit); fresh price ticks still retry the exit.
+    #[serde(default)]
+    pub stuck: bool,
 }
 
 impl Position {

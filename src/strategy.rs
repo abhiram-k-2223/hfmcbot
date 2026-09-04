@@ -212,6 +212,8 @@ mod tests {
             last_price: high,
             last_liquidity_usd: dec!(1_000_000),
             mode,
+            exit_attempts: 0,
+            stuck: false,
         }
     }
 
@@ -357,5 +359,4 @@ mod tests {
         assert!(on_price(&mut p, dec!(3.5), ts(25_000), &cfg).is_none());
     }
 }
-
 

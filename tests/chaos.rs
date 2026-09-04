@@ -3,6 +3,7 @@
 //! orders fail. No external RNG dependency — xorshift64 with fixed seeds keeps
 //! runs bit-reproducible.
 
+use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use hfmcbot::config::Config;
 use hfmcbot::engine::Engine;
@@ -104,8 +105,8 @@ fn prop_funnel_slices_always_sum_to_total() {
 
 /// PROPERTY: over random event streams with a fraction of orders failing,
 /// P&L conservation and deployed-capital reconciliation always hold.
-#[test]
-fn prop_random_streams_preserve_invariants() {
+#[tokio::test]
+async fn prop_random_streams_preserve_invariants() {
     let cfg = Config::paper_defaults();
     for seed in 1..=8u64 {
         let mut rng = XorShift::new(seed * 7_919);
@@ -116,7 +117,7 @@ fn prop_random_streams_preserve_invariants() {
         let executor = PaperExecutor::with_failure_bps(&cfg, failure_bps);
         let mut eng = Engine::new(cfg.clone(), Box::new(executor), audit);
         for ev in &events {
-            eng.on_event(ev);
+            eng.on_event(ev).await;
         }
         eng.check_invariants()
             .unwrap_or_else(|e| panic!("seed {seed} (failure {failure_bps}bps): {e}"));
@@ -124,16 +125,16 @@ fn prop_random_streams_preserve_invariants() {
 }
 
 /// All orders failing → no position ever opens, state stays exactly at start.
-#[test]
-fn all_orders_failing_leaves_state_untouched() {
+#[tokio::test]
+async fn all_orders_failing_leaves_state_untouched() {
     let cfg = Config::paper_defaults();
     let dir = tempfile::tempdir().unwrap();
     let audit = AuditLog::open(&dir.path().join("audit.jsonl")).unwrap();
     let executor = PaperExecutor::with_failure_bps(&cfg, 10_000);
     let mut eng = Engine::new(cfg.clone(), Box::new(executor), audit);
 
-    eng.on_event(&launch("GHOST", 0, dec!(0.001)));
-    eng.on_event(&launch("GHOST2", 65, dec!(0.001)));
+    eng.on_event(&launch("GHOST", 0, dec!(0.001))).await;
+    eng.on_event(&launch("GHOST2", 65, dec!(0.001))).await;
 
     assert_eq!(eng.open_positions(), 0);
     assert_eq!(eng.deployed_usd(), Decimal::ZERO);
@@ -148,8 +149,9 @@ struct FailFirstSell {
     sell_attempts: HashMap<String, u64>,
 }
 
+#[async_trait]
 impl Executor for FailFirstSell {
-    fn buy(
+    async fn buy(
         &mut self,
         mint: &str,
         budget_usd: Decimal,
@@ -160,10 +162,19 @@ impl Executor for FailFirstSell {
         order_id: &str,
     ) -> Result<Fill, ExecError> {
         self.inner
-            .buy(mint, budget_usd, price_usd, liquidity_usd, now, deadline, order_id)
+            .buy(
+                mint,
+                budget_usd,
+                price_usd,
+                liquidity_usd,
+                now,
+                deadline,
+                order_id,
+            )
+            .await
     }
 
-    fn sell(
+    async fn sell(
         &mut self,
         mint: &str,
         qty: Decimal,
@@ -171,20 +182,23 @@ impl Executor for FailFirstSell {
         liquidity_usd: Decimal,
         now: DateTime<Utc>,
         order_id: &str,
+        tier: hfmcbot::exec::TipTier,
     ) -> Result<Fill, ExecError> {
         let n = self.sell_attempts.entry(mint.to_string()).or_insert(0);
         *n += 1;
         if *n == 1 {
             return Err(ExecError::Rejected("chaos: first sell fails".into()));
         }
-        self.inner.sell(mint, qty, price_usd, liquidity_usd, now, order_id)
+        self.inner
+            .sell(mint, qty, price_usd, liquidity_usd, now, order_id, tier)
+            .await
     }
 }
 
 /// A failed sell must NOT close the position or corrupt state; the exit is
 /// retried on the next tick with a fresh order id and then lands.
-#[test]
-fn failed_sell_is_retried_and_state_stays_consistent() {
+#[tokio::test]
+async fn failed_sell_is_retried_and_state_stays_consistent() {
     let cfg = Config::paper_defaults();
     let dir = tempfile::tempdir().unwrap();
     let audit = AuditLog::open(&dir.path().join("audit.jsonl")).unwrap();
@@ -194,11 +208,11 @@ fn failed_sell_is_retried_and_state_stays_consistent() {
     };
     let mut eng = Engine::new(cfg.clone(), Box::new(executor), audit);
 
-    eng.on_event(&launch("RETRY", 0, dec!(0.001)));
+    eng.on_event(&launch("RETRY", 0, dec!(0.001))).await;
     assert_eq!(eng.open_positions(), 1);
 
     // -40% tick → stop_loss exit decision; the first sell attempt fails.
-    eng.on_event(&price("RETRY", 10, dec!(0.0006)));
+    eng.on_event(&price("RETRY", 10, dec!(0.0006))).await;
     assert_eq!(
         eng.open_positions(),
         1,
@@ -207,11 +221,9 @@ fn failed_sell_is_retried_and_state_stays_consistent() {
     eng.check_invariants().unwrap();
 
     // Next tick retries the exit and lands it.
-    eng.on_event(&price("RETRY", 11, dec!(0.0006)));
+    eng.on_event(&price("RETRY", 11, dec!(0.0006))).await;
     assert_eq!(eng.open_positions(), 0);
     assert_eq!(eng.closed_trades().len(), 1);
     assert_eq!(eng.closed_trades()[0].exit_reason, "stop_loss");
     eng.check_invariants().unwrap();
 }
-
-

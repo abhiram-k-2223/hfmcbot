@@ -1,0 +1,43 @@
+{
+ "data": {
+  "launches": [
+   {
+    "mint": "2LM8Jef9anihaoQShcPJ7jEmBikD9LSP9n2bwWJ3vF66",
+    "pool": "DXQyG9FgNoYWCwEQjLRUCFiuKYxcnq9ciUMShcTCVH66",
+    "name": "Astra",
+    "symbol": "ASTRA",
+    "creator": "EApkaRBSf2tCbVRtznQhwBPze9yCLhZxkjXfa397XzBe",
+    "quote": {
+     "mint": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+     "symbol": "OPENAI"
+    },
+    "launchpad": "raydium",
+    "mode": "reward",
+    "transferFee": {
+     "bps": 100
+    },
+    "logoUrl": "https://gateway.irys.xyz/87qmTpL5ZjjKKyMZQJp4TzoYjGC26E6vwZQFdxTF6EYX",
+    "startMarketCapUsd": 5102.111138430248,
+    "targetMarketCapUsd": 5000,
+    "createdAt": "2026-09-03T18:43:18.213Z"
+   },
+   {
+    "mint": "62oKNw9ohaYveNp31nh2QFgoUTzccEEcddFNhFf7T48y",
+    "pool": "3aw8ewBvFds1B2GW3aPcd4i4gxT6PhRj2EVXdZCWd2a2",
+    "name": "StonkMan",
+    "symbol": "SM",
+    "creator": "8G3E6dAnG96sZhtsguB59sznECZ64cTZS5vbN2SF5rPB",
+    "quote": {
+     "mint": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+     "symbol": "STONK"
+    },
+    "launchpad": "raydium",
+    "mode": "standard",
+    "logoUrl": "https://gateway.irys.xyz/FGidzCcXaufnBLcwVVsduW1QGDwcCZVP8czDhqCyapjP",
+    "startMarketCapUsd": 5017.417549988606,
+    "targetMarketCapUsd": 5000,
+    "createdAt": "2026-09-03T18:29:42.285Z"
+   }
+  ]
+ }
+}

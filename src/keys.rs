@@ -77,8 +77,8 @@ pub fn parse_secret_key(raw: &str, var: &'static str) -> Result<Keypair, KeyErro
 
     // JSON array format: "[1,2,...]" with 64 or 32 u8 entries.
     if raw.starts_with('[') {
-        let nums: Vec<u8> = serde_json::from_str(raw)
-            .map_err(|e| invalid(&format!("invalid JSON array: {e}")))?;
+        let nums: Vec<u8> =
+            serde_json::from_str(raw).map_err(|e| invalid(&format!("invalid JSON array: {e}")))?;
         return bytes_to_keypair(&nums, var);
     }
 
@@ -136,23 +136,45 @@ mod tests {
     fn parses_json_array_formats() {
         let kp = Keypair::new();
         let bytes = kp.to_bytes();
-        let json64 = format!("[{}]", bytes.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","));
-        assert_eq!(parse_secret_key(&json64, "TEST").unwrap().pubkey(), kp.pubkey());
+        let json64 = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(
+            parse_secret_key(&json64, "TEST").unwrap().pubkey(),
+            kp.pubkey()
+        );
 
         let seed_json = format!(
             "[{}]",
-            bytes[..32].iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")
+            bytes[..32]
+                .iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         );
-        assert_eq!(parse_secret_key(&seed_json, "TEST").unwrap().pubkey(), kp.pubkey());
+        assert_eq!(
+            parse_secret_key(&seed_json, "TEST").unwrap().pubkey(),
+            kp.pubkey()
+        );
     }
 
     #[test]
     fn rejects_garbage_without_echoing_secret() {
         for bad in ["", "!!!not-base58!!!", "[1,2,3]", "AAAA", "[1,2,999]"] {
             let raw = if bad.is_empty() { "zzz" } else { bad };
-            let err = parse_secret_key(raw, "HFM_SECRET_KEY").unwrap_err().to_string();
+            let err = parse_secret_key(raw, "HFM_SECRET_KEY")
+                .unwrap_err()
+                .to_string();
             // The secret value must never appear in the error.
-            assert!(!err.contains(raw) || raw.len() < 4, "error leaked secret: {err}");
+            assert!(
+                !err.contains(raw) || raw.len() < 4,
+                "error leaked secret: {err}"
+            );
             assert!(err.contains("HFM_SECRET_KEY"));
         }
         // Wrong length base58 (e.g. 10 bytes) rejected with length info.

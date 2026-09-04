@@ -4,8 +4,9 @@
 
 use crate::config::Config;
 use crate::types::Side;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Why the breaker tripped.
@@ -23,6 +24,18 @@ pub enum BlockReason {
     OpenPositionCap { open: usize, max: usize },
     #[error("trade throttle: {count} orders in last 60s >= max {max}/min")]
     Throttled { count: u32, max: u32 },
+}
+
+/// Serializable breaker/throttle state for crash-safe snapshots (M6).
+/// `open_positions` is deliberately excluded — the engine recomputes it
+/// from the restored position book, so the two can never disagree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskState {
+    pub day_realized_pnl: Decimal,
+    pub day: NaiveDate,
+    pub daily_loss_tripped: bool,
+    pub kill: bool,
+    pub recent_orders: Vec<DateTime<Utc>>,
 }
 
 /// Circuit-breaker / control state.
@@ -108,6 +121,29 @@ impl RiskEngine {
 
     pub fn set_open_positions(&mut self, open: usize) {
         self.open_positions = open;
+    }
+
+    /// Crash-safe persistence (M6): capture the breaker/throttle state so a
+    /// restart resumes with identical protection. `open_positions` is NOT
+    /// stored — the engine recomputes it from the restored book.
+    pub fn snapshot_state(&self) -> RiskState {
+        RiskState {
+            day_realized_pnl: self.day_realized_pnl,
+            day: self.day,
+            daily_loss_tripped: self.daily_loss_tripped,
+            kill: self.kill,
+            recent_orders: self.recent_orders.iter().copied().collect(),
+        }
+    }
+
+    /// Restore a snapshot. The manual kill flag is OR-ed, never cleared: a
+    /// kill engaged before the crash (or via env at this boot) stays engaged.
+    pub fn restore_state(&mut self, snap: RiskState) {
+        self.day_realized_pnl = snap.day_realized_pnl;
+        self.day = snap.day;
+        self.daily_loss_tripped = snap.daily_loss_tripped;
+        self.kill = self.kill || snap.kill;
+        self.recent_orders = snap.recent_orders.into_iter().collect();
     }
 
     pub fn day_realized_pnl(&self) -> Decimal {
@@ -292,5 +328,44 @@ mod tests {
         // ...but a sell (cutting a loser) goes through.
         risk.note_side(Side::Sell, ts(2));
     }
-}
 
+    #[test]
+    fn snapshot_restore_preserves_breakers_and_throttle_window() {
+        let mut cfg = Config::paper_defaults();
+        cfg.daily_loss_limit_pct = dec!(10);
+        cfg.max_trades_per_min = 2;
+        let mut risk = RiskEngine::new(cfg);
+        // Fill the throttle window, book a day loss, and trip the breaker.
+        assert!(risk.check_order(ts(0)).is_ok());
+        assert!(risk.check_order(ts(1)).is_ok());
+        risk.record_realized_pnl(dec!(-5000), ts(2));
+        assert!(risk.kill_switch());
+
+        let snap = risk.snapshot_state();
+        // Throttle window survives the round trip through JSON (VecDeque →
+        // Vec → VecDeque) with order intact.
+        assert_eq!(snap.recent_orders.len(), 2);
+
+        let mut fresh = RiskEngine::new(Config::paper_defaults());
+        // NOTE: throttle *limits* live in config, not the snapshot — restore
+        // with the same limits for continuity.
+        fresh.cfg.max_trades_per_min = 2;
+        assert!(!fresh.kill_switch());
+        fresh.restore_state(snap);
+        assert!(fresh.kill_switch(), "tripped breaker must persist");
+        assert_eq!(fresh.day_realized_pnl(), dec!(-5000));
+        // Still throttled at ts(3): the window carried over, so a restart
+        // cannot burst past the rate limit.
+        assert!(matches!(
+            fresh.check_order(ts(3)),
+            Err(BlockReason::Throttled { .. })
+        ));
+
+        // Kill flag is OR-ed, never cleared by a restore.
+        let mut cfg2 = Config::paper_defaults();
+        cfg2.kill_switch = true;
+        let mut kill_eng = RiskEngine::new(cfg2);
+        kill_eng.restore_state(fresh.snapshot_state());
+        assert!(kill_eng.kill_switch());
+    }
+}

@@ -63,8 +63,8 @@ fn spray_events() -> Vec<Event> {
     evs
 }
 
-#[test]
-fn spray_replay_captures_outlier_and_cuts_losers() {
+#[tokio::test]
+async fn spray_replay_captures_outlier_and_cuts_losers() {
     let mut cfg = Config::paper_defaults();
     // 7 launches × 3 slices land within the first minute; lift the throttle so
     // the whole spray gets out (default 6/min would deliberately funnel-limit).
@@ -75,7 +75,7 @@ fn spray_replay_captures_outlier_and_cuts_losers() {
 
     let mut feed = ReplayFeed::from_events(spray_events());
     while let Some(ev) = feed.next_event() {
-        engine.on_event(&ev);
+        engine.on_event(&ev).await;
     }
 
     let trades = engine.closed_trades();
@@ -114,8 +114,8 @@ fn spray_replay_captures_outlier_and_cuts_losers() {
     assert!(audit_text.contains("\"kind\":\"trade_closed\""));
 }
 
-#[test]
-fn replay_feed_from_file_round_trips() {
+#[tokio::test]
+async fn replay_feed_from_file_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("events.jsonl");
     let mut jsonl = String::new();
@@ -132,7 +132,7 @@ fn replay_feed_from_file_round_trips() {
     let mut feed = ReplayFeed::from_path(&path).unwrap();
     assert_eq!(feed.len(), 6 * 2 + 5);
     while let Some(ev) = feed.next_event() {
-        engine.on_event(&ev);
+        engine.on_event(&ev).await;
     }
     assert_eq!(engine.closed_trades().len(), 7);
 }
